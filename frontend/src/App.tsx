@@ -11,7 +11,7 @@ import WatchlistTable, { type WatchlistRow } from "./components/WatchlistTable";
 import { useTickerSocket } from "./hooks/useWebSocket";
 import { useWatchlistTickers } from "./hooks/useWatchlistTickers";
 import { api } from "./services/api";
-import type { Analysis, AutoTradeStatus, Candle, Interval, PaperPortfolio, PaperTrade, Portfolio, Product, SRLevel, Ticker } from "./types";
+import type { Analysis, AutoTradeLog, AutoTradeStatus, Candle, Interval, PaperPortfolio, PaperTrade, Portfolio, Product, SRLevel, Ticker } from "./types";
 
 const DEFAULT_PAIR      = "BTC-USD";
 const DEFAULT_WATCHLIST = ["BTC-USD", "ETH-USD"];
@@ -48,6 +48,8 @@ export default function App() {
   const [rightTab, setRightTab] = useState<RightTab>("signals");
   const [orderSide, setOrderSide] = useState<"buy" | "sell">("buy");
   const [autoStatus, setAutoStatus] = useState<Record<string, AutoTradeStatus>>({});
+  const [autoTradeLogs, setAutoTradeLogs] = useState<AutoTradeLog[]>([]);
+  const [liveOrderHistory, setLiveOrderHistory] = useState<PaperTrade[]>([]);
   const [loadingCandles, setLoadingCandles] = useState(false);
   const [loadingAnalysis, setLoadingAnalysis] = useState(false);
 
@@ -313,6 +315,8 @@ export default function App() {
     setAnalysis(null);
     setCandles([]);
     setTicker(null);
+    setAutoTradeLogs([]);
+    setLiveOrderHistory([]);
   }, []);
 
   // Called from watchlist table Buy/Sell buttons — select the pair, open order tab,
@@ -332,12 +336,43 @@ export default function App() {
     } catch {}
   }, []);
 
+  const fetchAutoTradeLogs = useCallback(async () => {
+    try {
+      const logs = await api.autoTrade.logs(selectedId);
+      setAutoTradeLogs(logs);
+    } catch {}
+  }, [selectedId]);
+
+  const fetchLiveOrderHistory = useCallback(async () => {
+    if (!authenticated) return;
+    try {
+      const orders = await api.orderHistory(selectedId);
+      setLiveOrderHistory(orders.map((o) => ({
+        trade_id:     o.order_id,
+        product_id:   selectedId,
+        side:         o.side as "buy" | "sell",
+        qty:          o.qty,
+        price:        o.price,
+        value:        o.qty * o.price,
+        fee:          0,
+        realized_pnl: null,
+        timestamp:    o.timestamp,
+      })));
+    } catch {}
+  }, [selectedId, authenticated]);
+
   useEffect(() => {
     fetchAutoStatus();
+    fetchAutoTradeLogs();
+    fetchLiveOrderHistory();
     if (autoStatusTimer.current) window.clearInterval(autoStatusTimer.current);
-    autoStatusTimer.current = window.setInterval(fetchAutoStatus, 10_000);
+    autoStatusTimer.current = window.setInterval(() => {
+      fetchAutoStatus();
+      fetchAutoTradeLogs();
+      fetchLiveOrderHistory();
+    }, 10_000);
     return () => { if (autoStatusTimer.current) window.clearInterval(autoStatusTimer.current); };
-  }, [fetchAutoStatus]);
+  }, [fetchAutoStatus, fetchAutoTradeLogs, fetchLiveOrderHistory]);
 
   const handleAutoToggle = useCallback(async (
     id: string,
@@ -368,6 +403,37 @@ export default function App() {
     () => allPaperTrades.filter((t) => t.product_id === selectedId),
     [allPaperTrades, selectedId]
   );
+
+  // Chart marker sources (merged, deduped by trade_id):
+  //   1. Paper trades   — for paper-mode bot actions (already recorded there)
+  //   2. Auto-trade logs — for live-mode bot actions (not in paper trading)
+  //   3. Live order history — real Coinbase fills (manual + live bot orders)
+  //   Live order history may overlap auto-trade logs; dedupe by rounding timestamp to the candle.
+  const chartTrades = useMemo<PaperTrade[]>(() => {
+    const status = autoStatus[selectedId];
+    const fromLogs: PaperTrade[] = (status?.mode === "live" ? autoTradeLogs : [])
+      .filter((log) => !log.action.startsWith("HOLD"))
+      .map((log) => ({
+        trade_id:     `auto-${log.timestamp}`,
+        product_id:   selectedId,
+        side:         log.action.startsWith("BUY") ? "buy" as const : "sell" as const,
+        qty:          0,
+        price:        log.price,
+        value:        0,
+        fee:          0,
+        realized_pnl: null,
+        timestamp:    log.timestamp,
+      }));
+
+    // Dedupe live orders against bot logs: if a log entry already covers the same
+    // candle+side, skip the raw Coinbase order to avoid double markers.
+    const logTimestamps = new Set(fromLogs.map((t) => Math.floor(t.timestamp / 3600) * 3600));
+    const fromHistory = liveOrderHistory.filter(
+      (o) => !logTimestamps.has(Math.floor(o.timestamp / 3600) * 3600)
+    );
+
+    return [...selectedTrades, ...fromLogs, ...fromHistory];
+  }, [selectedTrades, autoTradeLogs, liveOrderHistory, autoStatus, selectedId]);
 
   return (
     <div className="flex flex-col h-screen bg-bg-primary overflow-hidden">
@@ -407,7 +473,7 @@ export default function App() {
               analysis={analysis}
               tick={tick}
               interval={chartInterval}
-              trades={selectedTrades}
+              trades={chartTrades}
               onIntervalChange={(iv) => {
                 localStorage.setItem(LS_INTERVAL_KEY, iv);
                 setChartInterval(iv);

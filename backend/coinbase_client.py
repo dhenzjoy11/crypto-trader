@@ -207,6 +207,43 @@ class AdvancedClient:
                 accounts.append({"currency": cur, "available_balance": bal, "total_balance": tot})
         return accounts
 
+    def get_order_history(self, product_id: str, limit: int = 100) -> List[Dict]:
+        """Return filled orders for a product, newest first."""
+        if not self._rest:
+            raise PermissionError("Coinbase API keys not configured.")
+        resp = self._rest.list_orders(
+            product_id=product_id,
+            order_status=["FILLED"],
+            limit=limit,
+        )
+        raw = getattr(resp, "orders", None)
+        if raw is None:
+            raw = resp.get("orders", []) if isinstance(resp, dict) else []
+        orders = []
+        for o in raw:
+            d = o if isinstance(o, dict) else (vars(o) if hasattr(o, "__dict__") else {})
+            side_raw   = d.get("side", "")
+            created_at = d.get("created_time") or d.get("created_at", "")
+            avg_price  = float(d.get("average_filled_price", 0) or 0)
+            filled_sz  = float(d.get("filled_size", 0) or 0)
+            if not side_raw or avg_price <= 0:
+                continue
+            try:
+                import datetime
+                ts = datetime.datetime.fromisoformat(
+                    created_at.replace("Z", "+00:00")
+                ).timestamp()
+            except Exception:
+                ts = 0.0
+            orders.append({
+                "order_id":   d.get("order_id", ""),
+                "side":       side_raw.lower(),   # "buy" | "sell"
+                "price":      round(avg_price, 8),
+                "qty":        round(filled_sz, 8),
+                "timestamp":  ts,
+            })
+        return orders
+
     def place_order(
         self,
         product_id: str,

@@ -325,6 +325,17 @@ async def auth_status():
     return {"authenticated": advanced_client.authenticated}
 
 
+@app.get("/api/orders/history/{product_id}")
+async def get_order_history(product_id: str, limit: int = 100):
+    """Return filled Coinbase orders for a product (newest first)."""
+    if not advanced_client.authenticated:
+        return []
+    try:
+        return advanced_client.get_order_history(product_id, limit)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 # ── Paper trading routes ──────────────────────────────────────────────────────
 
 @app.get("/api/paper/portfolio")

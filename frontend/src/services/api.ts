@@ -59,6 +59,11 @@ export const api = {
     limit_price?: number;
   }) => post("/orders", order),
 
+  orderHistory: (productId: string) =>
+    get<Array<{ order_id: string; side: string; price: number; qty: number; timestamp: number }>>(
+      `/orders/history/${productId}`
+    ),
+
   autoTrade: {
     status: () => get<Record<string, AutoTradeStatus>>("/auto-trade/status"),
 

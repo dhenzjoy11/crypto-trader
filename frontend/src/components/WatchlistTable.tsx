@@ -302,21 +302,43 @@ export default function WatchlistTable({
               const paperPos     = paperPortfolio?.positions.find((p) => p.product_id === id);
               const hasPaper     = paperPos != null && paperPos.qty > 0;
 
+              // cost-per-unit for real account (cost_basis is total USD spent, total_balance is crypto qty)
+              const realCostPerUnit = (
+                !hasPaper &&
+                realAccount &&
+                !realAccount.is_cash &&
+                (realAccount.cost_basis ?? 0) > 0 &&
+                (realAccount.total_balance ?? 0) > 0
+              ) ? (realAccount.cost_basis! / realAccount.total_balance) : null;
+
               // Prefer paper position if it exists; fall back to real portfolio
               const qty = hasPaper ? paperPos.qty : (realAccount?.total_balance ?? 0);
               // Always use live price for MV so symbols like ZORA-USD (no Exchange API ticker) display correctly
               const mv  = hasPaper
                 ? (livePrice ? qty * livePrice : paperPos.market_value)
                 : (realAccount?.value_usd ?? (qty > 0 && livePrice ? qty * livePrice : null));
-              const avgCost  = hasPaper ? paperPos.avg_cost : null;
-              // Recompute P/L from live price so symbols not on Exchange API (e.g. ZORA-USD)
-              // still show correct values — backend falls back to 0 for those.
-              const livePnl    = hasPaper && livePrice && paperPos.avg_cost
+              const avgCost = hasPaper ? paperPos.avg_cost : (realCostPerUnit ?? null);
+
+              // Recompute P/L from live price when possible so out-of-date Coinbase snapshots
+              // don't lag (e.g. ZORA-USD not on Exchange API falls back to stored unrealized_pnl).
+              const livePnl = hasPaper && livePrice && paperPos.avg_cost
                 ? (livePrice - paperPos.avg_cost) * paperPos.qty
-                : (hasPaper ? paperPos.unrealized_pnl : null);
+                : hasPaper
+                  ? paperPos.unrealized_pnl
+                  : livePrice && realCostPerUnit && (realAccount!.total_balance ?? 0) > 0
+                    ? (livePrice - realCostPerUnit) * realAccount!.total_balance
+                    : (realAccount?.unrealized_pnl ?? null);
+
               const livePnlPct = hasPaper && livePrice && paperPos.avg_cost && paperPos.avg_cost > 0
                 ? ((livePrice - paperPos.avg_cost) / paperPos.avg_cost) * 100
-                : (hasPaper ? paperPos.unrealized_pnl_pct : null);
+                : hasPaper
+                  ? paperPos.unrealized_pnl_pct
+                  : livePrice && realCostPerUnit && realCostPerUnit > 0
+                    ? ((livePrice - realCostPerUnit) / realCostPerUnit) * 100
+                    : (realAccount?.cost_basis && realAccount.cost_basis > 0 && realAccount.unrealized_pnl != null
+                        ? (realAccount.unrealized_pnl / realAccount.cost_basis) * 100
+                        : null);
+
               const unrealizedPnl    = livePnl;
               const unrealizedPnlPct = livePnlPct;
               // 24h column: shows the coin's daily price move (not position P/L)
