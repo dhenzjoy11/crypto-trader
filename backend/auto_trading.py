@@ -53,7 +53,7 @@ class StrategyConfig:
 
     rsi_period:        int   = 14
     rsi_buy_threshold: float = 35
-    rsi_entry_threshold: float = 55  # BUY_INITIAL only when RSI < this (not overbought)
+    rsi_entry_threshold: float = 65  # BUY_INITIAL only when RSI < this (not overbought)
 
     ema_fast: int = 50
     ema_slow: int = 200
