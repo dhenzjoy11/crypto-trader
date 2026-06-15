@@ -19,7 +19,9 @@ import pandas as pd
 import paper_trading
 from coinbase_client import advanced_client, public_client
 
-STATE_FILE = os.path.join(os.path.dirname(__file__), "auto_trading_state.json")
+_ENV      = os.getenv("APP_ENV", "development")
+_SUFFIX   = "_prod" if _ENV == "production" else ""
+STATE_FILE = os.path.join(os.path.dirname(__file__), f"auto_trading_state{_SUFFIX}.json")
 CANDLE_INTERVAL_SEC = 3600   # 1h candles
 CHECK_INTERVAL_SEC  = 60     # check for new candles every minute
 CANDLE_HISTORY      = 300    # candles fetched for indicator warmup

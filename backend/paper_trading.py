@@ -9,7 +9,9 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
 
-STATE_FILE = os.path.join(os.path.dirname(__file__), "paper_trading_state.json")
+_ENV       = os.getenv("APP_ENV", "development")
+_SUFFIX    = "_prod" if _ENV == "production" else ""
+STATE_FILE = os.path.join(os.path.dirname(__file__), f"paper_trading_state{_SUFFIX}.json")
 STARTING_BALANCE = 10_000.0
 FEE_RATE = 0.001   # 0.1% per side (realistic taker fee)
 
