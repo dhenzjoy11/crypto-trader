@@ -29,10 +29,11 @@ GRANULARITY_MAP = {
 }
 
 POPULAR_PAIRS = [
-    "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD",
-    "ADA-USD", "AVAX-USD", "DOGE-USD", "DOT-USD", "LINK-USD",
+    "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
+    "ADA-USD", "AVAX-USD", "SHIB-USD", "DOT-USD", "LINK-USD",
     "MATIC-USD", "LTC-USD", "BCH-USD", "UNI-USD", "ATOM-USD",
-    "XLM-USD", "ALGO-USD", "FIL-USD", "APE-USD", "NEAR-USD",
+    "XLM-USD", "ALGO-USD", "NEAR-USD", "APE-USD", "PEPE-USD",
+    "BONK-USD", "FLOKI-USD", "WIF-USD", "ZORA-USD", "SUI-USD",
 ]
 
 
@@ -50,13 +51,13 @@ class PublicClient:
             and p.get("status") == "online"
             and not p.get("trading_disabled", False)
         ]
-        # Put popular pairs first
+        # Popular pairs first; rest sorted alphabetically
         def rank(p):
             pid = p.get("id", "")
-            return POPULAR_PAIRS.index(pid) if pid in POPULAR_PAIRS else 999
+            return (0, POPULAR_PAIRS.index(pid)) if pid in POPULAR_PAIRS else (1, pid)
 
         usd.sort(key=rank)
-        return usd[:60]
+        return usd
 
     async def get_candles(
         self, product_id: str, granularity: int, start: int, end: int
