@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: "Inter", system-ui, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: #0b0b14;
+  color: #e0e0e0;
+  overflow: hidden;
+  height: 100vh;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: #13131f;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a2a42;
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3a5a;
+}
+
+/* Chart container reset */
+.tv-chart-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* Number font */
+.num {
+  font-family: "JetBrains Mono", monospace;
+}
+
+/* Pulse animation for live dot */
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.live-dot {
+  animation: pulse-live 1.5s ease-in-out infinite;
+}
+
+/* Glow for signal levels */
+.glow-green {
+  box-shadow: 0 0 12px rgba(0, 200, 83, 0.3);
+}
+.glow-red {
+  box-shadow: 0 0 12px rgba(255, 23, 68, 0.3);
+}
