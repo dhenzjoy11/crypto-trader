@@ -45,15 +45,19 @@ class StrategyConfig:
     atr_period:   int   = 14
     support_atr_mult:    float = 1.5
     resistance_atr_mult: float = 2.0
-    stop_atr_mult:       float = 3.0
+    stop_atr_mult:       float = 2.0   # was 3.0 — tighter stop loss
 
-    add_size_pct:      float = 0.25   # was 0.10 — larger adds on confirmed signals
+    add_size_pct:      float = 0.25
     max_support_adds:  int   = 2
     max_breakout_adds: int   = 3
 
-    rsi_period:        int   = 14
-    rsi_buy_threshold: float = 35
-    rsi_entry_threshold: float = 65  # BUY_INITIAL only when RSI < this (not overbought)
+    rsi_period:               int   = 14
+    rsi_buy_threshold:        float = 42    # was 35 — catch more dips in bull markets
+    rsi_entry_threshold:      float = 65    # normal uptrend RSI ceiling
+    rsi_entry_strong_trend:   float = 75    # relaxed ceiling when EMA gap >= strong_trend_ema_gap_pct
+    strong_trend_ema_gap_pct: float = 3.0   # EMA50–EMA200 gap % to qualify as strong trend
+    rsi_entry_breakout:       float = 78    # ceiling for fresh N-period high breakout entries
+    entry_ema_distance_pct:   float = 0.05  # BUY_INITIAL: price must be within 5% above EMA50
 
     ema_fast: int = 50
     ema_slow: int = 200
@@ -64,11 +68,14 @@ class StrategyConfig:
     take_profit_pct_1: float = 0.05
     take_profit_pct_2: float = 0.20
 
-    trailing_activation_profit: float = 0.08   # was 0.20 — arm trailing stop earlier
+    trailing_activation_profit: float = 0.08
     trailing_stop_pct:          float = 0.10
 
     breakout_confirmation_candles: int = 2
-    cooldown_candles: int = 3   # candles to skip after a stop-loss exit
+    breakout_volume_factor:  float = 0.75  # add-on-breakout needs >= 75% of 20-period avg volume
+    breakout_entry_lookback: int   = 48    # candles to look back for fresh-high breakout entry
+    breakout_volume_mult:    float = 1.5   # fresh-high breakout entry needs 1.5× avg volume
+    cooldown_candles: int = 3
 
 
 @dataclass
@@ -107,7 +114,8 @@ class SupportResistanceCryptoBot:
         avg_gain = gain.rolling(self.config.rsi_period).mean()
         avg_loss = loss.rolling(self.config.rsi_period).mean()
         rs       = avg_gain / avg_loss
-        df["rsi"] = 100 - (100 / (1 + rs))
+        df["rsi"]       = 100 - (100 / (1 + rs))
+        df["volume_ma"] = df["volume"].rolling(20).mean()
         return df
 
     def calculate_levels(self, baseline: float, atr: float):
@@ -134,13 +142,40 @@ class SupportResistanceCryptoBot:
             return Action.HOLD, {}
 
         if not self.state.in_position:
-            # Improvement 6: cooldown after stop-loss — skip N candles before re-entering
+            # Cooldown: skip N candles after a stop-loss exit before re-entering
             if self.state.cooldown_candles_remaining > 0:
                 self.state.cooldown_candles_remaining -= 1
                 return Action.HOLD, {"price": price, "cooldown_remaining": self.state.cooldown_candles_remaining}
-            # Improvement 1: entry filter — only buy in uptrend and when not overbought
-            if not (ema_fast > ema_slow and rsi < self.config.rsi_entry_threshold):
+
+            entry_signal = False
+            if ema_fast > ema_slow:  # uptrend required for all entry types
+                vol_ma = float(row["volume_ma"]) if "volume_ma" in df.columns and not pd.isna(row["volume_ma"]) else 0
+
+                # Entry type A: two-speed RSI + price not too extended above EMA50
+                trend_gap_pct  = (ema_fast - ema_slow) / ema_slow * 100
+                rsi_ceiling    = (self.config.rsi_entry_strong_trend
+                                  if trend_gap_pct >= self.config.strong_trend_ema_gap_pct
+                                  else self.config.rsi_entry_threshold)
+                ema_dist_pct   = (price - ema_fast) / ema_fast  # negative = price below EMA50
+                standard_entry = (rsi < rsi_ceiling
+                                  and ema_dist_pct <= self.config.entry_ema_distance_pct)
+
+                # Entry type B: fresh breakout above N-period high on strong volume
+                lookback    = min(i, self.config.breakout_entry_lookback)
+                recent_high = df["high"].iloc[max(0, i - lookback):i].max() if lookback > 0 else 0
+                breakout_entry = (
+                    lookback >= self.config.breakout_entry_lookback
+                    and price > recent_high
+                    and vol_ma > 0
+                    and row["volume"] >= vol_ma * self.config.breakout_volume_mult
+                    and rsi < self.config.rsi_entry_breakout
+                )
+
+                entry_signal = standard_entry or breakout_entry
+
+            if not entry_signal:
                 return Action.HOLD, {"price": price, "waiting_for_entry": True}
+
             self.state.in_position    = True
             self.state.entry_price    = price
             self.state.entry_baseline = price
@@ -211,8 +246,12 @@ class SupportResistanceCryptoBot:
             }
 
         if self.should_confirm_breakout(df, i, resistance):
-            self.state.baseline      = resistance
-            self.state.support_adds  = 0
+            self.state.baseline     = resistance
+            self.state.support_adds = 0
+            # Volume confirmation: skip breakout add if volume is suspiciously thin
+            vol_ma = float(row["volume_ma"]) if "volume_ma" in df.columns and not pd.isna(row["volume_ma"]) else 0
+            if vol_ma > 0 and row["volume"] < vol_ma * self.config.breakout_volume_factor:
+                return Action.HOLD, {"price": price, "new_baseline": self.state.baseline, "breakout_low_volume": True}
             if self.state.breakout_adds < self.config.max_breakout_adds:
                 add_size = self.state.position_size * self.config.add_size_pct
                 self.state.position_size  += add_size
