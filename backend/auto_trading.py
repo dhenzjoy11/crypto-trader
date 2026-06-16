@@ -75,7 +75,7 @@ class StrategyConfig:
     breakout_volume_factor:  float = 0.75  # add-on-breakout needs >= 75% of 20-period avg volume
     breakout_entry_lookback: int   = 48    # candles to look back for fresh-high breakout entry
     breakout_volume_mult:    float = 1.5   # fresh-high breakout entry needs 1.5× avg volume
-    cooldown_candles: int = 3
+    cooldown_candles: int = 1
 
 
 @dataclass
