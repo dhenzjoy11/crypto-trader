@@ -52,6 +52,7 @@ class StrategyConfig:
     max_breakout_adds: int   = 3
 
     rsi_period:               int   = 14
+    rsi_buy_floor:            float = 20    # BUY_ADD_SUPPORT blocked when RSI below this (crash guard)
     rsi_buy_threshold:        float = 42    # was 35 — catch more dips in bull markets
     rsi_entry_threshold:      float = 65    # normal uptrend RSI ceiling
     rsi_entry_strong_trend:   float = 75    # relaxed ceiling when EMA gap >= strong_trend_ema_gap_pct
@@ -90,7 +91,8 @@ class PositionState:
     highest_price:   float = 0.0
     trailing_active: bool  = False
     tp1_triggered:   bool  = False
-    cooldown_candles_remaining: int = 0  # skip BUY_INITIAL for N candles after stop-loss
+    cooldown_candles_remaining: int   = 0
+    last_stop_price:           float = 0.0  # re-entry blocked until price exceeds this
 
 
 class SupportResistanceCryptoBot:
@@ -146,6 +148,11 @@ class SupportResistanceCryptoBot:
             if self.state.cooldown_candles_remaining > 0:
                 self.state.cooldown_candles_remaining -= 1
                 return Action.HOLD, {"price": price, "cooldown_remaining": self.state.cooldown_candles_remaining}
+
+            # Re-entry guard: price must recover above the level that stopped us out
+            if self.state.last_stop_price > 0 and price <= self.state.last_stop_price:
+                return Action.HOLD, {"price": price, "waiting_for_recovery": True,
+                                     "last_stop_price": self.state.last_stop_price}
 
             entry_signal = False
             if ema_fast > ema_slow:  # uptrend required for all entry types
@@ -230,42 +237,45 @@ class SupportResistanceCryptoBot:
         if self.state.trailing_active:
             trailing_stop = self.state.highest_price * (1 - self.config.trailing_stop_pct)
             if price <= trailing_stop:
-                old_size   = self.state.position_size
-                # Improvement 6: cooldown after trailing stop exit
-                self.state = PositionState(cooldown_candles_remaining=self.config.cooldown_candles)
+                old_size = self.state.position_size
+                self.state = PositionState(
+                    cooldown_candles_remaining=self.config.cooldown_candles,
+                    last_stop_price=trailing_stop,
+                )
                 return Action.SELL_TRAILING_STOP, {
                     "price": price, "sold_size": old_size, "trailing_stop": trailing_stop,
                 }
 
         if price <= stop:
-            old_size   = self.state.position_size
-            # Improvement 6: cooldown after stop-loss exit
-            self.state = PositionState(cooldown_candles_remaining=self.config.cooldown_candles)
+            old_size = self.state.position_size
+            self.state = PositionState(
+                cooldown_candles_remaining=self.config.cooldown_candles,
+                last_stop_price=stop,
+            )
             return Action.SELL_STOP, {
                 "price": price, "sold_size": old_size, "stop": stop,
             }
 
         if self.should_confirm_breakout(df, i, resistance):
-            self.state.baseline     = resistance
-            self.state.support_adds = 0
-            # Volume confirmation: skip breakout add if volume is suspiciously thin
             vol_ma = float(row["volume_ma"]) if "volume_ma" in df.columns and not pd.isna(row["volume_ma"]) else 0
-            if vol_ma > 0 and row["volume"] < vol_ma * self.config.breakout_volume_factor:
-                return Action.HOLD, {"price": price, "new_baseline": self.state.baseline, "breakout_low_volume": True}
-            if self.state.breakout_adds < self.config.max_breakout_adds:
+            low_volume = vol_ma > 0 and row["volume"] < vol_ma * self.config.breakout_volume_factor
+            if not low_volume and self.state.breakout_adds < self.config.max_breakout_adds:
+                # Baseline only moves when the order actually fires — not on skipped breakouts
+                self.state.baseline     = resistance
+                self.state.support_adds = 0
                 add_size = self.state.position_size * self.config.add_size_pct
-                self.state.position_size  += add_size
-                self.state.breakout_adds  += 1
+                self.state.position_size += add_size
+                self.state.breakout_adds += 1
                 return Action.BUY_ADD_BREAKOUT, {
                     "price": price, "new_baseline": self.state.baseline,
                     "added_size": add_size, "position_size": self.state.position_size,
                 }
-            return Action.HOLD, {"price": price, "new_baseline": self.state.baseline}
+            return Action.HOLD, {"price": price, "resistance": resistance, "breakout_low_volume": low_volume}
 
         uptrend = price > ema_slow and ema_fast > ema_slow
         if (
             price <= support
-            and rsi <= self.config.rsi_buy_threshold
+            and self.config.rsi_buy_floor < rsi <= self.config.rsi_buy_threshold
             and uptrend
             and self.state.support_adds < self.config.max_support_adds
         ):
