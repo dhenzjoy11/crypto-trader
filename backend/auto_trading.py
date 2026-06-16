@@ -659,7 +659,9 @@ class AutoTraderManager:
         remaining_budget = max(0.0, entry.max_investment_usd - invested)
 
         if action == Action.BUY_INITIAL:
-            usd = min(entry.trade_amount_usd, usd_balance, remaining_budget)
+            # Don't check remaining_budget here — pre-existing holdings of the asset
+            # would count as "invested" and prevent a proper initial entry.
+            usd = min(entry.trade_amount_usd, usd_balance)
             if usd < 1:
                 raise ValueError(f"BUY_INITIAL skipped — insufficient USD (${usd_balance:.2f})")
             await self._place_order_with_retry(pid, "buy", "market", usd)
