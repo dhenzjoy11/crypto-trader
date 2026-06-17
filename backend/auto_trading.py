@@ -53,7 +53,8 @@ class StrategyConfig:
 
     rsi_period:               int   = 14
     rsi_buy_floor:            float = 20    # BUY_ADD_SUPPORT blocked when RSI below this (crash guard)
-    rsi_buy_threshold:        float = 42    # was 35 — catch more dips in bull markets
+    rsi_buy_threshold:        float = 28    # only add when truly oversold (RSI ≤ 28)
+    min_add_stop_buffer_atr:  float = 1.0  # add blocked if price < stop + N×ATR (prevents adding near stop)
     rsi_entry_threshold:      float = 65    # normal uptrend RSI ceiling
     rsi_entry_strong_trend:   float = 75    # relaxed ceiling when EMA gap >= strong_trend_ema_gap_pct
     strong_trend_ema_gap_pct: float = 3.0   # EMA50–EMA200 gap % to qualify as strong trend
@@ -273,10 +274,12 @@ class SupportResistanceCryptoBot:
             return Action.HOLD, {"price": price, "resistance": resistance, "breakout_low_volume": low_volume}
 
         uptrend = price > ema_slow and ema_fast > ema_slow
+        add_has_stop_room = price >= stop + self.config.min_add_stop_buffer_atr * atr
         if (
             price <= support
             and self.config.rsi_buy_floor < rsi <= self.config.rsi_buy_threshold
             and uptrend
+            and add_has_stop_room
             and self.state.support_adds < self.config.max_support_adds
         ):
             add_size = self.state.position_size * self.config.add_size_pct
