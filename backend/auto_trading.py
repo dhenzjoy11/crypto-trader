@@ -81,7 +81,9 @@ class StrategyConfig:
     breakout_volume_factor:  float = 0.75  # add-on-breakout needs >= 75% of 20-period avg volume
     breakout_entry_lookback: int   = 48    # candles to look back for fresh-high breakout entry
     breakout_volume_mult:    float = 1.5   # fresh-high breakout entry needs 1.5× avg volume
-    cooldown_candles: int = 1
+    cooldown_candles: int = 3
+
+    btc_rsi_entry_floor: float = 45  # block BUY_INITIAL when BTC RSI is below this (short-term weakness)
 
 
 @dataclass
@@ -137,7 +139,7 @@ class SupportResistanceCryptoBot:
             return False
         return all(df["close"].iloc[i - n + 1 : i + 1] > resistance)
 
-    def step(self, df: pd.DataFrame, i: int):
+    def step(self, df: pd.DataFrame, i: int, btc_rsi: Optional[float] = None):
         row      = df.iloc[i]
         price    = row["close"]
         atr      = row["atr"]
@@ -158,6 +160,10 @@ class SupportResistanceCryptoBot:
             if self.state.last_stop_price > 0 and price <= self.state.last_stop_price:
                 return Action.HOLD, {"price": price, "waiting_for_recovery": True,
                                      "last_stop_price": self.state.last_stop_price}
+
+            # BTC regime filter: skip new entries when BTC is in short-term weakness
+            if btc_rsi is not None and btc_rsi < self.config.btc_rsi_entry_floor:
+                return Action.HOLD, {"price": price, "btc_regime_blocked": True, "btc_rsi": round(btc_rsi, 1)}
 
             entry_signal = False
             if ema_fast > ema_slow:  # uptrend required for all entry types
@@ -257,10 +263,11 @@ class SupportResistanceCryptoBot:
                 }
 
         if price <= stop:
-            old_size = self.state.position_size
+            old_size   = self.state.position_size
+            prev_entry = self.state.entry_price
             self.state = PositionState(
                 cooldown_candles_remaining=self.config.cooldown_candles,
-                last_stop_price=stop,
+                last_stop_price=prev_entry,  # re-entry blocked until price recovers above original entry
             )
             return Action.SELL_STOP, {
                 "price": price, "sold_size": old_size, "stop": stop,
@@ -550,13 +557,16 @@ class AutoTraderManager:
         # the same candle, which caused duplicate BUY_INITIAL orders.
         entry.last_candle_time = int(df["time"].iloc[-1])
 
+        # Fetch BTC RSI once per batch for regime filter
+        btc_rsi = await self._get_btc_rsi()
+
         # Process each new candle in chronological order
         for idx in new_df.index:
             i = df.index.get_loc(idx)
 
             # Snapshot state before step() so we can rollback if a live order fails
             pre_state = copy.deepcopy(bot.state)
-            action, info = bot.step(df, i)
+            action, info = bot.step(df, i, btc_rsi=btc_rsi)
 
             log_entry = {
                 "action":    action.value,
@@ -711,6 +721,25 @@ class AutoTraderManager:
                 return
             await self._place_order_with_retry(pid, "sell", "market", asset_balance)
             print(f"[AutoTrade LIVE] {pid} {action.value} {asset_balance:.6f} {base_currency}")
+
+    # ── BTC regime ────────────────────────────────────────────────────────────
+
+    async def _get_btc_rsi(self) -> Optional[float]:
+        """1h BTC RSI for entry regime filter. Returns None on failure (fail-permissive)."""
+        try:
+            import time as _time
+            end   = int(_time.time())
+            start = end - CANDLE_INTERVAL_SEC * 50
+            raw   = await public_client.get_candles("BTC-USD", CANDLE_INTERVAL_SEC, start, end)
+            if not raw or len(raw) < 20:
+                return None
+            df_btc = _raw_to_df(raw)
+            df_btc = SupportResistanceCryptoBot(StrategyConfig()).add_indicators(df_btc)
+            val    = df_btc["rsi"].iloc[-1]
+            return float(val) if not pd.isna(val) else None
+        except Exception as e:
+            print(f"[AutoTrade] BTC RSI fetch failed: {e}")
+            return None
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
