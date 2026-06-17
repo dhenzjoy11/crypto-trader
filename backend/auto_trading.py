@@ -70,6 +70,10 @@ class StrategyConfig:
     take_profit_pct_1: float = 0.05
     take_profit_pct_2: float = 0.20
 
+    # RSI overbought exits — fire before TP% if RSI peaks first
+    rsi_sell_overbought: float = 72    # RSI above this → partial sell (same as TP1, fires even if TP% not hit)
+    rsi_sell_full_exit:  float = 80    # RSI above this after TP1 → sell all remaining
+
     trailing_activation_profit: float = 0.08
     trailing_stop_pct:          float = 0.10
 
@@ -207,28 +211,33 @@ class SupportResistanceCryptoBot:
         profit_pct = (price - self.state.entry_price) / self.state.entry_price
 
         # ── Two-tier take-profit ──────────────────────────────────────────────
-        # TP1: sell 50% of the position at take_profit_pct_1 (e.g. 5%)
-        if (self.config.take_profit_pct_1 > 0
-                and not self.state.tp1_triggered
-                and profit_pct >= self.config.take_profit_pct_1):
+        # TP1: sell 50% when price target OR RSI overbought is reached first
+        tp1_price_hit = self.config.take_profit_pct_1 > 0 and profit_pct >= self.config.take_profit_pct_1
+        tp1_rsi_hit   = self.config.rsi_sell_overbought > 0 and rsi >= self.config.rsi_sell_overbought
+        if not self.state.tp1_triggered and (tp1_price_hit or tp1_rsi_hit):
             self.state.tp1_triggered  = True
             self.state.position_size *= 0.5
-            # Improvement 2: raise stop to breakeven after TP1 to protect profit
             self.state.entry_baseline = self.state.entry_price
             return Action.SELL_TP1, {
                 "price":      price,
                 "sell_ratio": 0.5,
                 "profit_pct": round(profit_pct * 100, 2),
+                "rsi":        round(rsi, 2),
             }
 
-        # TP2: sell all remaining shares at take_profit_pct_2 (e.g. 20%)
-        if self.config.take_profit_pct_2 > 0 and profit_pct >= self.config.take_profit_pct_2:
+        # TP2: sell all remaining when price target OR RSI full-exit threshold reached (after TP1)
+        tp2_price_hit = self.config.take_profit_pct_2 > 0 and profit_pct >= self.config.take_profit_pct_2
+        tp2_rsi_hit   = (self.config.rsi_sell_full_exit > 0
+                         and self.state.tp1_triggered
+                         and rsi >= self.config.rsi_sell_full_exit)
+        if tp2_price_hit or tp2_rsi_hit:
             old_size   = self.state.position_size
             self.state = PositionState()
             return Action.SELL_TP2, {
                 "price":      price,
                 "sold_size":  old_size,
                 "profit_pct": round(profit_pct * 100, 2),
+                "rsi":        round(rsi, 2),
             }
 
         # ── Trailing stop (used when TP2 == 0 or hasn't triggered yet) ───────
