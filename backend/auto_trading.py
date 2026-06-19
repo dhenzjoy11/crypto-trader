@@ -86,6 +86,8 @@ class StrategyConfig:
 
     btc_rsi_entry_floor: float = 45  # block BUY_INITIAL when BTC RSI is below this (short-term weakness)
 
+    max_stop_loss_pct: float = 0.04  # hard cap: stop never further than 4% below entry price
+
 
 @dataclass
 class PositionState:
@@ -237,8 +239,11 @@ class SupportResistanceCryptoBot:
         support, resistance, _ = self.calculate_levels(self.state.baseline, atr)
         # Stop uses ATR locked at entry — prevents stop from drifting wider when volatility spikes.
         # Falls back to current ATR for positions loaded from old state files.
-        stop_atr = self.state.entry_atr if self.state.entry_atr > 0 else float(atr)
-        stop = self.state.entry_baseline - self.config.stop_atr_mult * stop_atr
+        stop_atr  = self.state.entry_atr if self.state.entry_atr > 0 else float(atr)
+        stop      = self.state.entry_baseline - self.config.stop_atr_mult * stop_atr
+        # Hard cap: stop can never be more than max_stop_loss_pct below the original entry price
+        if self.config.max_stop_loss_pct > 0 and self.state.entry_price > 0:
+            stop = max(stop, self.state.entry_price * (1 - self.config.max_stop_loss_pct))
 
         profit_pct = (price - self.state.entry_price) / self.state.entry_price
 
