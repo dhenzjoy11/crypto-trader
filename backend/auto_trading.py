@@ -61,6 +61,7 @@ class StrategyConfig:
     rsi_entry_breakout:       float = 78    # ceiling for fresh N-period high breakout entries
     entry_ema_distance_pct:   float = 0.05  # BUY_INITIAL: price must be within 5% above EMA50
 
+    ema_short: int = 20   # short-term trend: EMA20 > EMA50 required at entry
     ema_fast: int = 50
     ema_slow: int = 200
 
@@ -100,6 +101,7 @@ class PositionState:
     tp1_triggered:   bool  = False
     cooldown_candles_remaining: int   = 0
     last_stop_price:           float = 0.0  # re-entry blocked until price exceeds this
+    entry_atr:                 float = 0.0  # ATR locked at entry — stop never drifts wider
 
 
 class SupportResistanceCryptoBot:
@@ -115,8 +117,9 @@ class SupportResistanceCryptoBot:
         df["tr3"] = (df["low"]  - df["prev_close"]).abs()
         df["true_range"] = df[["tr1", "tr2", "tr3"]].max(axis=1)
         df["atr"]      = df["true_range"].rolling(self.config.atr_period).mean()
-        df["ema_fast"] = df["close"].ewm(span=self.config.ema_fast, adjust=False).mean()
-        df["ema_slow"] = df["close"].ewm(span=self.config.ema_slow, adjust=False).mean()
+        df["ema_short"] = df["close"].ewm(span=self.config.ema_short, adjust=False).mean()
+        df["ema_fast"]  = df["close"].ewm(span=self.config.ema_fast,  adjust=False).mean()
+        df["ema_slow"]  = df["close"].ewm(span=self.config.ema_slow,  adjust=False).mean()
         delta    = df["close"].diff()
         gain     = delta.clip(lower=0)
         loss     = -delta.clip(upper=0)
@@ -139,18 +142,25 @@ class SupportResistanceCryptoBot:
             return False
         return all(df["close"].iloc[i - n + 1 : i + 1] > resistance)
 
-    def step(self, df: pd.DataFrame, i: int, btc_rsi: Optional[float] = None):
-        row      = df.iloc[i]
-        price    = row["close"]
-        atr      = row["atr"]
-        rsi      = row["rsi"]
-        ema_fast = row["ema_fast"]
-        ema_slow = row["ema_slow"]
+    def step(self, df: pd.DataFrame, i: int, btc_rsi: Optional[float] = None, is_live_candle: bool = True):
+        row       = df.iloc[i]
+        price     = row["close"]
+        atr       = row["atr"]
+        rsi       = row["rsi"]
+        rsi_prev  = float(df["rsi"].iloc[i - 1]) if i > 0 and not pd.isna(df["rsi"].iloc[i - 1]) else rsi
+        ema_short = float(row["ema_short"]) if "ema_short" in df.columns and not pd.isna(row["ema_short"]) else float("nan")
+        ema_fast  = row["ema_fast"]
+        ema_slow  = row["ema_slow"]
 
         if pd.isna(atr) or pd.isna(rsi) or pd.isna(ema_slow):
             return Action.HOLD, {}
 
         if not self.state.in_position:
+            # Catch-up: historical candles replayed after restart — skip new entries to
+            # avoid buying at stale prices from hours ago.
+            if not is_live_candle:
+                return Action.HOLD, {"price": price, "catch_up_skip": True}
+
             # Cooldown: skip N candles after a stop-loss exit before re-entering
             if self.state.cooldown_candles_remaining > 0:
                 self.state.cooldown_candles_remaining -= 1
@@ -167,6 +177,19 @@ class SupportResistanceCryptoBot:
 
             entry_signal = False
             if ema_fast > ema_slow:  # uptrend required for all entry types
+                # Short-term alignment: EMA20 must also be above EMA50 (catches downtrends 10-15h earlier)
+                # Fail-permissive: if ema_short unavailable, skip check
+                ema_short_aligned = pd.isna(ema_short) or ema_short > ema_fast
+                # RSI uptick: don't enter while selling momentum is still increasing
+                rsi_turning_up = rsi > rsi_prev
+
+                if not ema_short_aligned or not rsi_turning_up:
+                    return Action.HOLD, {
+                        "price": price,
+                        "ema_short_blocked": not ema_short_aligned,
+                        "rsi_uptick_blocked": not rsi_turning_up,
+                    }
+
                 vol_ma = float(row["volume_ma"]) if "volume_ma" in df.columns and not pd.isna(row["volume_ma"]) else 0
 
                 # Entry type A: two-speed RSI + price not too extended above EMA50
@@ -200,6 +223,7 @@ class SupportResistanceCryptoBot:
             self.state.baseline       = price
             self.state.position_size  = 1.0
             self.state.highest_price  = price
+            self.state.entry_atr      = float(atr)
             return Action.BUY_INITIAL, {
                 "price": price,
                 "baseline": self.state.baseline,
@@ -211,8 +235,10 @@ class SupportResistanceCryptoBot:
         if self.state.entry_baseline == 0.0 and self.state.entry_price > 0:
             self.state.entry_baseline = self.state.entry_price
         support, resistance, _ = self.calculate_levels(self.state.baseline, atr)
-        # Stop anchored to original entry level — never ratchets up after breakout adds
-        stop = self.state.entry_baseline - self.config.stop_atr_mult * atr
+        # Stop uses ATR locked at entry — prevents stop from drifting wider when volatility spikes.
+        # Falls back to current ATR for positions loaded from old state files.
+        stop_atr = self.state.entry_atr if self.state.entry_atr > 0 else float(atr)
+        stop = self.state.entry_baseline - self.config.stop_atr_mult * stop_atr
 
         profit_pct = (price - self.state.entry_price) / self.state.entry_price
 
@@ -563,10 +589,13 @@ class AutoTraderManager:
         # Process each new candle in chronological order
         for idx in new_df.index:
             i = df.index.get_loc(idx)
+            candle_time = int(df.iloc[i]["time"])
+            # Catch-up: candle closed >2h ago — server was down. Block new entries.
+            is_live_candle = (end - candle_time) < CANDLE_INTERVAL_SEC * 2
 
             # Snapshot state before step() so we can rollback if a live order fails
             pre_state = copy.deepcopy(bot.state)
-            action, info = bot.step(df, i, btc_rsi=btc_rsi)
+            action, info = bot.step(df, i, btc_rsi=btc_rsi, is_live_candle=is_live_candle)
 
             log_entry = {
                 "action":    action.value,
