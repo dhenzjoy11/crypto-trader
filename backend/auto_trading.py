@@ -107,6 +107,7 @@ class PositionState:
     cooldown_candles_remaining: int   = 0
     last_stop_price:           float = 0.0  # re-entry blocked until price exceeds this
     entry_atr:                 float = 0.0  # ATR locked at entry — stop never drifts wider
+    position_qty:              float = 0.0  # exact crypto units bought by bot (not pre-existing holdings)
 
 
 class SupportResistanceCryptoBot:
@@ -731,41 +732,46 @@ class AutoTraderManager:
         usd_balance   = usd_holding["available_balance"] if usd_holding else 0.0
         asset_balance = asset_holding["available_balance"] if asset_holding else 0.0   # crypto units
 
-        # Compute how much USD is currently invested in this position (based on live value)
-        invested = (asset_holding["value_usd"] if asset_holding else 0.0)
+        # Compute how much USD is currently invested based on bot-tracked qty only
+        # (not asset_holding["value_usd"] which includes pre-existing user holdings)
+        invested = bot.state.position_qty * price if bot.state.position_qty > 0 else 0.0
         remaining_budget = max(0.0, entry.max_investment_usd - invested)
 
         if action == Action.BUY_INITIAL:
-            # Don't check remaining_budget here — pre-existing holdings of the asset
-            # would count as "invested" and prevent a proper initial entry.
             usd = min(entry.trade_amount_usd, usd_balance)
             if usd < 1:
                 raise ValueError(f"BUY_INITIAL skipped — insufficient USD (${usd_balance:.2f})")
             await self._place_order_with_retry(pid, "buy", "market", usd)
-            print(f"[AutoTrade LIVE] {pid} BUY_INITIAL ${usd:.2f}")
+            bot.state.position_qty = usd / price
+            print(f"[AutoTrade LIVE] {pid} BUY_INITIAL ${usd:.2f} → {bot.state.position_qty:.6f} {base_currency}")
 
         elif action in (Action.BUY_ADD_SUPPORT, Action.BUY_ADD_BREAKOUT):
             usd = min(entry.trade_amount_usd * bot.config.add_size_pct, usd_balance, remaining_budget)
             if usd < 1:
                 raise ValueError(f"{action.value} skipped — insufficient USD (${usd_balance:.2f})")
             await self._place_order_with_retry(pid, "buy", "market", usd)
-            print(f"[AutoTrade LIVE] {pid} {action.value} ${usd:.2f}")
+            bot.state.position_qty += usd / price
+            print(f"[AutoTrade LIVE] {pid} {action.value} ${usd:.2f} → total {bot.state.position_qty:.6f} {base_currency}")
 
         elif action == Action.SELL_TP1:
-            sell_qty = asset_balance * 0.5
+            # Use bot-tracked qty; fall back to asset_balance for positions opened before this fix
+            sell_qty = (bot.state.position_qty * 0.5) if bot.state.position_qty > 0 else (asset_balance * 0.5)
             if sell_qty <= 0:
-                print(f"[AutoTrade LIVE] {pid} SELL_TP1 skipped — no asset balance")
+                print(f"[AutoTrade LIVE] {pid} SELL_TP1 skipped — no position qty")
                 return
             await self._place_order_with_retry(pid, "sell", "market", sell_qty)
-            print(f"[AutoTrade LIVE] {pid} SELL_TP1 {sell_qty:.6f} {base_currency}")
+            bot.state.position_qty = bot.state.position_qty * 0.5 if bot.state.position_qty > 0 else 0.0
+            print(f"[AutoTrade LIVE] {pid} SELL_TP1 {sell_qty:.6f} {base_currency} (remaining: {bot.state.position_qty:.6f})")
 
         elif action in (Action.SELL_STOP, Action.SELL_TRAILING_STOP, Action.SELL_TP2):
-            if asset_balance <= 0:
-                print(f"[AutoTrade LIVE] {pid} {action.value} skipped — no asset balance")
+            # Use bot-tracked qty; fall back to asset_balance for positions opened before this fix
+            sell_qty = bot.state.position_qty if bot.state.position_qty > 0 else asset_balance
+            if sell_qty <= 0:
+                print(f"[AutoTrade LIVE] {pid} {action.value} skipped — no position qty")
                 bot.state = PositionState()
                 return
-            await self._place_order_with_retry(pid, "sell", "market", asset_balance)
-            print(f"[AutoTrade LIVE] {pid} {action.value} {asset_balance:.6f} {base_currency}")
+            await self._place_order_with_retry(pid, "sell", "market", sell_qty)
+            print(f"[AutoTrade LIVE] {pid} {action.value} {sell_qty:.6f} {base_currency}")
 
     # ── BTC regime ────────────────────────────────────────────────────────────
 
