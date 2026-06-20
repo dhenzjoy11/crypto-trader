@@ -84,7 +84,10 @@ class StrategyConfig:
     breakout_volume_mult:    float = 1.5   # fresh-high breakout entry needs 1.5× avg volume
     cooldown_candles: int = 3
 
-    btc_rsi_entry_floor: float = 45  # block BUY_INITIAL when BTC RSI is below this (short-term weakness)
+    btc_rsi_entry_floor: float = 45  # trend-follow mode: block entry when BTC RSI below this
+    btc_rsi_dip_floor:  float = 35  # dip-buy mode: relaxed BTC RSI floor (dips happen in mild BTC weakness)
+
+    rsi_dip_buy_threshold: float = 40  # dip-buy mode: RSI must be below this (oversold bounce)
 
     max_stop_loss_pct: float = 0.04  # hard cap: stop never further than 4% below entry price
 
@@ -173,48 +176,55 @@ class SupportResistanceCryptoBot:
                 return Action.HOLD, {"price": price, "waiting_for_recovery": True,
                                      "last_stop_price": self.state.last_stop_price}
 
-            # BTC regime filter: skip new entries when BTC is in short-term weakness
-            if btc_rsi is not None and btc_rsi < self.config.btc_rsi_entry_floor:
-                return Action.HOLD, {"price": price, "btc_regime_blocked": True, "btc_rsi": round(btc_rsi, 1)}
-
             entry_signal = False
-            if ema_fast > ema_slow:  # uptrend required for all entry types
-                # Short-term alignment: EMA20 must also be above EMA50 (catches downtrends 10-15h earlier)
-                # Fail-permissive: if ema_short unavailable, skip check
+            dip_buy_mode = False
+
+            if ema_fast > ema_slow:  # medium-term uptrend required for all entry types
+                rsi_turning_up    = rsi > rsi_prev
                 ema_short_aligned = pd.isna(ema_short) or ema_short > ema_fast
-                # RSI uptick: don't enter while selling momentum is still increasing
-                rsi_turning_up = rsi > rsi_prev
 
-                if not ema_short_aligned or not rsi_turning_up:
-                    return Action.HOLD, {
-                        "price": price,
-                        "ema_short_blocked": not ema_short_aligned,
-                        "rsi_uptick_blocked": not rsi_turning_up,
-                    }
+                # ── Mode 1: Trend-follow ──────────────────────────────────────────
+                # EMA20 > EMA50, RSI uptick, BTC RSI >= 45
+                if ema_short_aligned and rsi_turning_up:
+                    btc_ok_trend = btc_rsi is None or btc_rsi >= self.config.btc_rsi_entry_floor
+                    if btc_ok_trend:
+                        vol_ma = float(row["volume_ma"]) if "volume_ma" in df.columns and not pd.isna(row["volume_ma"]) else 0
 
-                vol_ma = float(row["volume_ma"]) if "volume_ma" in df.columns and not pd.isna(row["volume_ma"]) else 0
+                        # Entry type A: two-speed RSI + price not too extended above EMA50
+                        trend_gap_pct  = (ema_fast - ema_slow) / ema_slow * 100
+                        rsi_ceiling    = (self.config.rsi_entry_strong_trend
+                                          if trend_gap_pct >= self.config.strong_trend_ema_gap_pct
+                                          else self.config.rsi_entry_threshold)
+                        ema_dist_pct   = (price - ema_fast) / ema_fast
+                        standard_entry = (rsi < rsi_ceiling
+                                          and ema_dist_pct <= self.config.entry_ema_distance_pct)
 
-                # Entry type A: two-speed RSI + price not too extended above EMA50
-                trend_gap_pct  = (ema_fast - ema_slow) / ema_slow * 100
-                rsi_ceiling    = (self.config.rsi_entry_strong_trend
-                                  if trend_gap_pct >= self.config.strong_trend_ema_gap_pct
-                                  else self.config.rsi_entry_threshold)
-                ema_dist_pct   = (price - ema_fast) / ema_fast  # negative = price below EMA50
-                standard_entry = (rsi < rsi_ceiling
-                                  and ema_dist_pct <= self.config.entry_ema_distance_pct)
+                        # Entry type B: fresh breakout above N-period high on strong volume
+                        lookback    = min(i, self.config.breakout_entry_lookback)
+                        recent_high = df["high"].iloc[max(0, i - lookback):i].max() if lookback > 0 else 0
+                        breakout_entry = (
+                            lookback >= self.config.breakout_entry_lookback
+                            and price > recent_high
+                            and vol_ma > 0
+                            and row["volume"] >= vol_ma * self.config.breakout_volume_mult
+                            and rsi < self.config.rsi_entry_breakout
+                        )
 
-                # Entry type B: fresh breakout above N-period high on strong volume
-                lookback    = min(i, self.config.breakout_entry_lookback)
-                recent_high = df["high"].iloc[max(0, i - lookback):i].max() if lookback > 0 else 0
-                breakout_entry = (
-                    lookback >= self.config.breakout_entry_lookback
-                    and price > recent_high
-                    and vol_ma > 0
-                    and row["volume"] >= vol_ma * self.config.breakout_volume_mult
-                    and rsi < self.config.rsi_entry_breakout
-                )
+                        entry_signal = standard_entry or breakout_entry
 
-                entry_signal = standard_entry or breakout_entry
+                # ── Mode 2: Dip-buy ───────────────────────────────────────────────
+                # Price below EMA50 (we're in a dip), RSI oversold and turning up,
+                # BTC RSI >= 35 (relaxed — dips often happen during mild BTC weakness)
+                if not entry_signal:
+                    btc_ok_dip = btc_rsi is None or btc_rsi >= self.config.btc_rsi_dip_floor
+                    dip_buy_mode = (
+                        not ema_short_aligned
+                        and price < ema_fast
+                        and rsi < self.config.rsi_dip_buy_threshold
+                        and rsi_turning_up
+                        and btc_ok_dip
+                    )
+                    entry_signal = dip_buy_mode
 
             if not entry_signal:
                 return Action.HOLD, {"price": price, "waiting_for_entry": True}
@@ -227,9 +237,10 @@ class SupportResistanceCryptoBot:
             self.state.highest_price  = price
             self.state.entry_atr      = float(atr)
             return Action.BUY_INITIAL, {
-                "price": price,
-                "baseline": self.state.baseline,
+                "price":         price,
+                "baseline":      self.state.baseline,
                 "position_size": self.state.position_size,
+                "dip_buy":       1.0 if dip_buy_mode else 0.0,
             }
 
         self.state.highest_price = max(self.state.highest_price, price)
