@@ -91,6 +91,8 @@ class StrategyConfig:
 
     max_stop_loss_pct: float = 0.04  # hard cap: stop never further than 4% below entry price
 
+    taker_fee_rate: float = 0.006   # Coinbase taker fee per order (0.6%); used as RSI-exit gate
+
 
 @dataclass
 class PositionState:
@@ -258,35 +260,45 @@ class SupportResistanceCryptoBot:
             stop = max(stop, self.state.entry_price * (1 - self.config.max_stop_loss_pct))
 
         profit_pct = (price - self.state.entry_price) / self.state.entry_price
+        # Minimum gross gain needed for an RSI-triggered exit to be profitable after round-trip fees
+        rsi_exit_min_gain = self.config.taker_fee_rate * 2
 
         # ── Two-tier take-profit ──────────────────────────────────────────────
-        # TP1: sell 50% when price target OR RSI overbought is reached first
+        # TP1: sell 50% when price target OR RSI overbought is reached first.
+        # RSI exit is gated: only fire if we're at least covering round-trip fees.
         tp1_price_hit = self.config.take_profit_pct_1 > 0 and profit_pct >= self.config.take_profit_pct_1
-        tp1_rsi_hit   = self.config.rsi_sell_overbought > 0 and rsi >= self.config.rsi_sell_overbought
+        tp1_rsi_hit   = (self.config.rsi_sell_overbought > 0
+                         and rsi >= self.config.rsi_sell_overbought
+                         and profit_pct >= rsi_exit_min_gain)
+        fee_adj_pct = round((profit_pct - 2 * self.config.taker_fee_rate) * 100, 2)
         if not self.state.tp1_triggered and (tp1_price_hit or tp1_rsi_hit):
             self.state.tp1_triggered  = True
             self.state.position_size *= 0.5
             self.state.entry_baseline = self.state.entry_price
             return Action.SELL_TP1, {
-                "price":      price,
-                "sell_ratio": 0.5,
-                "profit_pct": round(profit_pct * 100, 2),
-                "rsi":        round(rsi, 2),
+                "price":           price,
+                "sell_ratio":      0.5,
+                "profit_pct":      round(profit_pct * 100, 2),
+                "profit_pct_net":  fee_adj_pct,
+                "rsi":             round(rsi, 2),
             }
 
-        # TP2: sell all remaining when price target OR RSI full-exit threshold reached (after TP1)
+        # TP2: sell all remaining when price target OR RSI full-exit threshold reached (after TP1).
+        # RSI exit gated by same fee-aware minimum gain.
         tp2_price_hit = self.config.take_profit_pct_2 > 0 and profit_pct >= self.config.take_profit_pct_2
         tp2_rsi_hit   = (self.config.rsi_sell_full_exit > 0
                          and self.state.tp1_triggered
-                         and rsi >= self.config.rsi_sell_full_exit)
+                         and rsi >= self.config.rsi_sell_full_exit
+                         and profit_pct >= rsi_exit_min_gain)
         if tp2_price_hit or tp2_rsi_hit:
             old_size   = self.state.position_size
             self.state = PositionState()
             return Action.SELL_TP2, {
-                "price":      price,
-                "sold_size":  old_size,
-                "profit_pct": round(profit_pct * 100, 2),
-                "rsi":        round(rsi, 2),
+                "price":          price,
+                "sold_size":      old_size,
+                "profit_pct":     round(profit_pct * 100, 2),
+                "profit_pct_net": fee_adj_pct,
+                "rsi":            round(rsi, 2),
             }
 
         # ── Trailing stop (used when TP2 == 0 or hasn't triggered yet) ───────
@@ -303,6 +315,7 @@ class SupportResistanceCryptoBot:
                 )
                 return Action.SELL_TRAILING_STOP, {
                     "price": price, "sold_size": old_size, "trailing_stop": trailing_stop,
+                    "profit_pct": round(profit_pct * 100, 2), "profit_pct_net": fee_adj_pct,
                 }
 
         if price <= stop:
@@ -314,6 +327,7 @@ class SupportResistanceCryptoBot:
             )
             return Action.SELL_STOP, {
                 "price": price, "sold_size": old_size, "stop": stop,
+                "profit_pct": round(profit_pct * 100, 2), "profit_pct_net": fee_adj_pct,
             }
 
         if self.should_confirm_breakout(df, i, resistance):
