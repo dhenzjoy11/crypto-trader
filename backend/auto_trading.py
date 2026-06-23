@@ -91,6 +91,7 @@ class StrategyConfig:
 
     max_stop_loss_pct: float = 0.04  # hard cap: stop never further than 4% below entry price
 
+    min_ema_gap_pct: float = 0.01   # EMA50 must be at least 1% above EMA200 to enter (filters borderline uptrends)
     taker_fee_rate: float = 0.006   # Coinbase taker fee per order (0.6%); used as RSI-exit gate
 
 
@@ -182,7 +183,8 @@ class SupportResistanceCryptoBot:
             entry_signal = False
             dip_buy_mode = False
 
-            if ema_fast > ema_slow:  # medium-term uptrend required for all entry types
+            ema_gap_pct = (ema_fast - ema_slow) / ema_slow if ema_slow > 0 else 0
+            if ema_fast > ema_slow and ema_gap_pct >= self.config.min_ema_gap_pct:
                 rsi_turning_up    = rsi > rsi_prev
                 ema_short_aligned = pd.isna(ema_short) or ema_short > ema_fast
 
@@ -292,7 +294,7 @@ class SupportResistanceCryptoBot:
                          and profit_pct >= rsi_exit_min_gain)
         if tp2_price_hit or tp2_rsi_hit:
             old_size   = self.state.position_size
-            self.state = PositionState()
+            self.state = PositionState(cooldown_candles_remaining=self.config.cooldown_candles)
             return Action.SELL_TP2, {
                 "price":          price,
                 "sold_size":      old_size,
